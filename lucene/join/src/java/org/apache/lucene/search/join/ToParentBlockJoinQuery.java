@@ -107,6 +107,10 @@ public class ToParentBlockJoinQuery extends Query {
     this.scoreMode = scoreMode;
   }
 
+  public BitSetProducer getParentsFilter(){
+    return parentsFilter;
+  }
+  
   private ToParentBlockJoinQuery(Query origChildQuery, Query childQuery, BitSetProducer parentsFilter, ScoreMode scoreMode) {
     super();
     this.origChildQuery = origChildQuery;

@@ -30,8 +30,10 @@ import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Map.Entry;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -48,6 +50,13 @@ import org.apache.lucene.document.StoredField;
 import org.apache.lucene.document.TextField;
 import org.apache.lucene.index.*;
 import org.apache.lucene.search.*;
+import org.apache.lucene.search.grouping.GroupDocs;
+import org.apache.lucene.search.grouping.TopGroups;
+import org.apache.lucene.search.join.BitSetProducer;
+import org.apache.lucene.search.join.ToChildBlockJoinQuery;
+import org.apache.lucene.search.join.ToParentBlockJoinCollector;
+import org.apache.lucene.search.join.ToParentBlockJoinIndexSearcher;
+import org.apache.lucene.search.join.ToParentBlockJoinQuery;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.uninverting.UninvertingReader;
 import org.apache.lucene.util.Bits;
@@ -1510,7 +1519,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable,SolrIn
       }
     }
 
-
+    flags = (NO_CHECK_QCACHE | NO_SET_QCACHE | NO_CHECK_FILTERCACHE); //removeme
     // we can try and look up the complete query in the cache.
     // we can't do that if filter!=null though (we don't want to
     // do hashCode() and equals() for a big DocSet).
@@ -1586,7 +1595,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable,SolrIn
         }
       }
     }
-
+    useFilterCache = false; //TODO removeme
     if (useFilterCache) {
       // now actually use the filter cache.
       // for large filters that match few documents, this may be
@@ -1723,7 +1732,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable,SolrIn
     int last = len;
     if (last < 0 || last > maxDoc()) last=maxDoc();
     final int lastDocRequested = last;
-    int nDocsReturned;
+    int nDocsReturned = 0;
     int totalHits;
     float maxScore;
     int[] ids;
@@ -1788,30 +1797,117 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable,SolrIn
       // no docs on this page, so cursor doesn't change
       qr.setNextCursorMark(cmd.getCursorMark());
     } else {
-      final TopDocsCollector topCollector = buildTopDocsCollector(len, cmd);
-      Collector collector = topCollector;
-      buildAndRunCollectorChain(qr, query, collector, cmd, pf.postFilter);
-
-      totalHits = topCollector.getTotalHits();
-      TopDocs topDocs = topCollector.topDocs(0, len);
-      populateNextCursorMarkFromTopDocs(qr, cmd, topDocs);
-
-      maxScore = totalHits>0 ? topDocs.getMaxScore() : 0.0f;
-      nDocsReturned = topDocs.scoreDocs.length;
-      ids = new int[nDocsReturned];
-      scores = (cmd.getFlags()&GET_SCORES)!=0 ? new float[nDocsReturned] : null;
-      for (int i=0; i<nDocsReturned; i++) {
-        ScoreDoc scoreDoc = topDocs.scoreDocs[i];
-        ids[i] = scoreDoc.doc;
-        if (scores != null) scores[i] = scoreDoc.score;
+      boolean useToParentBlock = false;
+      if(query instanceof FilteredQuery){
+        FilteredQuery q=(FilteredQuery)query;
+        if(q.getQuery() instanceof ToParentBlockJoinQuery){
+          useToParentBlock = true;
+        }
       }
+      InternalData iData=null;
+      if(useToParentBlock){
+        iData=useToParentBlockJoinCollector(qr,query,cmd,pf,len);  
+      }else{
+        iData=useTopDocsCollector(qr,query,cmd,pf,len);  
+      }
+      nDocsReturned = iData.nDocsReturned;
+      ids=iData.ids;
+      scores = iData.scores;
+      totalHits=iData.totalHits;
+      maxScore = iData.maxScore;
     }
 
+    
     int sliceLen = Math.min(lastDocRequested,nDocsReturned);
     if (sliceLen < 0) sliceLen=0;
     qr.setDocList(new DocSlice(0,sliceLen,ids,scores,totalHits,maxScore));
   }
 
+  class InternalData{
+    int nDocsReturned;
+    int totalHits;
+    float maxScore;
+    int[] ids=new int[0];
+    float[] scores=null;    
+  }
+  
+  private InternalData useTopDocsCollector(QueryResult qr, Query query, QueryCommand cmd, ProcessedFilter pf, int len) throws IOException {
+    final TopDocsCollector topCollector = buildTopDocsCollector(len, cmd);
+    Collector collector = topCollector;
+    buildAndRunCollectorChain(qr, query, collector, cmd, pf.postFilter);
+    InternalData iData=new InternalData();
+    iData.totalHits = topCollector.getTotalHits();
+    TopDocs topDocs = topCollector.topDocs(0, len);
+    populateNextCursorMarkFromTopDocs(qr, cmd, topDocs);
+    iData.maxScore = iData.totalHits>0 ? topDocs.getMaxScore() : 0.0f;
+    iData.nDocsReturned = topDocs.scoreDocs.length;
+    iData.ids = new int[iData.nDocsReturned];
+    iData.scores = (cmd.getFlags()&GET_SCORES)!=0 ? new float[iData.nDocsReturned] : null;
+    for (int i=0; i<iData.nDocsReturned; i++) {
+      ScoreDoc scoreDoc = topDocs.scoreDocs[i];
+      iData.ids[i] = scoreDoc.doc;
+      if (iData.scores != null) iData.scores[i] = scoreDoc.score;
+    }   
+    return iData;
+  }
+  
+  private InternalData useToParentBlockJoinCollector(QueryResult qr, Query query, QueryCommand cmd, ProcessedFilter pf, int len) throws IOException {
+    ToParentBlockJoinCollector toParentBlockJoinCollector=new ToParentBlockJoinCollector(Sort.RELEVANCE, len, true, true);
+    FilteredQuery q=(FilteredQuery)query;
+    ToParentBlockJoinQuery mainParentQuery=(ToParentBlockJoinQuery)q.getQuery();
+    IndexSearcher searcher = new ToParentBlockJoinIndexSearcher(wrapReader(core, rawReader));
+    searcher.search(query, toParentBlockJoinCollector);
+    SchemaField keyField = schema.getUniqueKeyField();  
+    org.apache.solr.schema.FieldType idFt = keyField.getType();
+    InternalData iData=new InternalData();
+    TopGroups topGroups=toParentBlockJoinCollector.getTopGroupsWithAllChildDocs(mainParentQuery, Sort.RELEVANCE, 0, 0, true);    
+    if(topGroups == null) return iData;
+    int numberOfParents=topGroups.totalGroupCount;
+    LinkedHashMap<Integer,Float> data=new LinkedHashMap<>();
+    iData.totalHits = numberOfParents;
+    iData.maxScore = iData.totalHits>0 ? toParentBlockJoinCollector.getMaxScore() : 0.0f;
+    BitSetProducer parentBitSetProducer = mainParentQuery.getParentsFilter();
+    for(int i=0;i<numberOfParents;i++){
+      try{
+        GroupDocs group=topGroups.groups[i];
+        int parentId=(Integer)group.groupValue;        
+        Set<String> preFetchFieldNames=new HashSet<>();
+        preFetchFieldNames.add(keyField.getName());
+        Document parentDoc = searcher.doc(parentId,preFetchFieldNames);
+        String parentIdExt = schema.printableUniqueKey(parentDoc);
+        TermQuery childFilter=new TermQuery(new Term("content_type", "current_entry"));
+        Query parentFilter = idFt.getFieldQuery(null, keyField, parentIdExt);
+        Query childsQuery = new ToChildBlockJoinQuery(parentFilter, parentBitSetProducer);  
+        DocList children = getDocList(childsQuery, childFilter, new Sort(), 0, 1);
+        if(children.matches() > 0) {
+          DocIterator j = children.iterator();
+          while(j.hasNext()) {
+            Integer childDocNum = j.next();
+            data.put(childDocNum, 0.0f);
+          }
+        }  
+        for(ScoreDoc matchingDoc:group.scoreDocs){
+          data.put(matchingDoc.doc, matchingDoc.score);
+          break;
+        }        
+      }catch(Exception e){
+        iData.totalHits++;
+      }
+    }
+    iData.ids = new int[data.keySet().size()];    
+    iData.scores = new float[data.keySet().size()];
+    int i=0;
+    for(Entry<Integer,Float> entry: data.entrySet()){
+      iData.ids[i] = entry.getKey();
+      iData.scores[i] = entry.getValue();
+      i++;
+    }
+    iData.nDocsReturned = iData.ids.length;
+    
+    return iData;
+  }
+  
+  
   // any DocSet returned is for the query only, without any filtering... that way it may
   // be cached if desired.
   private DocSet getDocListAndSetNC(QueryResult qr,QueryCommand cmd) throws IOException {
