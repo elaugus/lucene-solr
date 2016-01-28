@@ -1519,7 +1519,6 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable,SolrIn
       }
     }
 
-    flags = (NO_CHECK_QCACHE | NO_SET_QCACHE | NO_CHECK_FILTERCACHE); //removeme
     // we can try and look up the complete query in the cache.
     // we can't do that if filter!=null though (we don't want to
     // do hashCode() and equals() for a big DocSet).
@@ -1595,7 +1594,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable,SolrIn
         }
       }
     }
-    useFilterCache = false; //TODO removeme
+
     if (useFilterCache) {
       // now actually use the filter cache.
       // for large filters that match few documents, this may be
