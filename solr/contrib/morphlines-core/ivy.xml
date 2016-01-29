@@ -18,7 +18,7 @@
 -->
 <ivy-module version="2.0" xmlns:maven="http://ant.apache.org/ivy/maven">
   <info organisation="org.apache.solr" module="morphlines-core" />
-  <configurations defaultconfmapping="compile->master;test->master;test.DfsMiniCluster->master">
+  <configurations defaultconfmapping="compile->master;test->default;test.DfsMiniCluster->master">
     <!-- artifacts in the "compile" configuration will go into morphlines-core/lib/ -->
     <conf name="compile" transitive="false" />
     <!-- artifacts in the "test" and "test.DfsMiniCluster" configuration will go into morphlines-core/test-lib/ -->

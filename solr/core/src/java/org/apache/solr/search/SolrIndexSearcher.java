@@ -1519,6 +1519,8 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable,SolrIn
       }
     }
 
+    flags = (NO_CHECK_QCACHE | NO_SET_QCACHE | NO_CHECK_FILTERCACHE);
+    
     // we can try and look up the complete query in the cache.
     // we can't do that if filter!=null though (we don't want to
     // do hashCode() and equals() for a big DocSet).
@@ -1745,7 +1747,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable,SolrIn
     if (pf.filter != null) {
       query = new FilteredQuery(query, pf.filter);
     }
-
+    int sliceLen = -1;
     // handle zero case...
     if (lastDocRequested<=0) {
       final float[] topscore = new float[] { Float.NEGATIVE_INFINITY };
@@ -1805,19 +1807,22 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable,SolrIn
       }
       InternalData iData=null;
       if(useToParentBlock){
-        iData=useToParentBlockJoinCollector(qr,query,cmd,pf,len);  
+        iData=useToParentBlockJoinCollector(qr,query,cmd,pf,len);
+        int parentsSliceLen = Math.min(lastDocRequested,iData.totalHits);
+        if (parentsSliceLen < 0) parentsSliceLen=0;
+        qr.setDocSet(new DocSlice(0,parentsSliceLen,iData.parentDocuments,iData.parentScores,iData.totalHits,iData.maxScore));
       }else{
         iData=useTopDocsCollector(qr,query,cmd,pf,len);  
       }
       nDocsReturned = iData.nDocsReturned;
-      ids=iData.ids;
-      scores = iData.scores;
+      ids=iData.finalDocuments;
+      scores = iData.documentsScores;
       totalHits=iData.totalHits;
       maxScore = iData.maxScore;
     }
 
     
-    int sliceLen = Math.min(lastDocRequested,nDocsReturned);
+    sliceLen = Math.min(lastDocRequested,nDocsReturned);
     if (sliceLen < 0) sliceLen=0;
     qr.setDocList(new DocSlice(0,sliceLen,ids,scores,totalHits,maxScore));
   }
@@ -1826,8 +1831,10 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable,SolrIn
     int nDocsReturned;
     int totalHits;
     float maxScore;
-    int[] ids=new int[0];
-    float[] scores=null;    
+    int[] finalDocuments=new int[0];
+    int[] parentDocuments=new int[0];
+    float[] documentsScores=null;
+    float[] parentScores=null;  
   }
   
   private InternalData useTopDocsCollector(QueryResult qr, Query query, QueryCommand cmd, ProcessedFilter pf, int len) throws IOException {
@@ -1840,12 +1847,12 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable,SolrIn
     populateNextCursorMarkFromTopDocs(qr, cmd, topDocs);
     iData.maxScore = iData.totalHits>0 ? topDocs.getMaxScore() : 0.0f;
     iData.nDocsReturned = topDocs.scoreDocs.length;
-    iData.ids = new int[iData.nDocsReturned];
-    iData.scores = (cmd.getFlags()&GET_SCORES)!=0 ? new float[iData.nDocsReturned] : null;
+    iData.finalDocuments = new int[iData.nDocsReturned];
+    iData.documentsScores = (cmd.getFlags()&GET_SCORES)!=0 ? new float[iData.nDocsReturned] : null;
     for (int i=0; i<iData.nDocsReturned; i++) {
       ScoreDoc scoreDoc = topDocs.scoreDocs[i];
-      iData.ids[i] = scoreDoc.doc;
-      if (iData.scores != null) iData.scores[i] = scoreDoc.score;
+      iData.finalDocuments[i] = scoreDoc.doc;
+      if (iData.documentsScores != null) iData.documentsScores[i] = scoreDoc.score;
     }   
     return iData;
   }
@@ -1862,14 +1869,16 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable,SolrIn
     TopGroups topGroups=toParentBlockJoinCollector.getTopGroupsWithAllChildDocs(mainParentQuery, Sort.RELEVANCE, 0, 0, true);    
     if(topGroups == null) return iData;
     int numberOfParents=topGroups.totalGroupCount;
-    LinkedHashMap<Integer,Float> data=new LinkedHashMap<>();
+    LinkedHashMap<Integer,Float> childrenData=new LinkedHashMap<>();
+    LinkedHashMap<Integer,Float> parentsData=new LinkedHashMap<>();
     iData.totalHits = numberOfParents;
     iData.maxScore = iData.totalHits>0 ? toParentBlockJoinCollector.getMaxScore() : 0.0f;
     BitSetProducer parentBitSetProducer = mainParentQuery.getParentsFilter();
     for(int i=0;i<numberOfParents;i++){
       try{
         GroupDocs group=topGroups.groups[i];
-        int parentId=(Integer)group.groupValue;        
+        int parentId=(Integer)group.groupValue;
+        parentsData.put(parentId, group.maxScore);
         Set<String> preFetchFieldNames=new HashSet<>();
         preFetchFieldNames.add(keyField.getName());
         Document parentDoc = searcher.doc(parentId,preFetchFieldNames);
@@ -1882,27 +1891,34 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable,SolrIn
           DocIterator j = children.iterator();
           while(j.hasNext()) {
             Integer childDocNum = j.next();
-            data.put(childDocNum, 0.0f);
+            childrenData.put(childDocNum, 0.0f);
           }
         }  
         for(ScoreDoc matchingDoc:group.scoreDocs){
-          data.put(matchingDoc.doc, matchingDoc.score);
+          childrenData.put(matchingDoc.doc, matchingDoc.score);
           break;
         }        
       }catch(Exception e){
-        iData.totalHits++;
+        iData.totalHits--;
       }
     }
-    iData.ids = new int[data.keySet().size()];    
-    iData.scores = new float[data.keySet().size()];
+    iData.finalDocuments = new int[childrenData.keySet().size()];    
+    iData.documentsScores = new float[childrenData.keySet().size()];
     int i=0;
-    for(Entry<Integer,Float> entry: data.entrySet()){
-      iData.ids[i] = entry.getKey();
-      iData.scores[i] = entry.getValue();
+    for(Entry<Integer,Float> entry: childrenData.entrySet()){
+      iData.finalDocuments[i] = entry.getKey();
+      iData.documentsScores[i] = entry.getValue();
       i++;
     }
-    iData.nDocsReturned = iData.ids.length;
-    
+    iData.parentDocuments = new int[parentsData.keySet().size()];    
+    iData.parentScores = new float[parentsData.keySet().size()];
+    int j=0;
+    for(Entry<Integer,Float> entry: parentsData.entrySet()){
+      iData.parentDocuments[j] = entry.getKey();
+      iData.parentScores[j] = entry.getValue();
+      j++;
+    }
+    iData.nDocsReturned = iData.finalDocuments.length;    
     return iData;
   }
   
