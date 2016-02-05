@@ -802,9 +802,10 @@ public final class ManagedIndexSchema extends IndexSchema {
       newSchema.copyFieldsMap = cloneCopyFieldsMap(copyFieldsMap);
       newSchema.copyFieldTargetCounts
           = (Map<SchemaField,Integer>)((HashMap<SchemaField,Integer>)copyFieldTargetCounts).clone();
-      newSchema.dynamicCopyFields = new DynamicCopy[dynamicCopyFields.length];
-      System.arraycopy(dynamicCopyFields, 0, newSchema.dynamicCopyFields, 0, dynamicCopyFields.length);
-
+      if(dynamicCopyFields!=null){
+        newSchema.dynamicCopyFields = new DynamicCopy[dynamicCopyFields.length];
+        System.arraycopy(dynamicCopyFields, 0, newSchema.dynamicCopyFields, 0, dynamicCopyFields.length);
+      }
       for (Map.Entry<String,Collection<String>> entry : copyFields.entrySet()) {
         // Key is the source, values are the destinations
         for (String destination : entry.getValue()) {
