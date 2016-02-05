@@ -306,7 +306,7 @@ public class FacetProcessor<FacetRequestT extends FacetRequest>  {
 
     // TODO: always collect counts or not???
 
-    int count;
+    int count=0;
 
     if (result != null) {
       count = result.size();
@@ -317,7 +317,9 @@ public class FacetProcessor<FacetRequestT extends FacetRequest>  {
       } else {
         result = fcontext.searcher.getDocSet(q, fcontext.base);
       }
-      count = result.size();
+      if(result!=null){
+        count = result.size();
+      }
     } else {
       if (q == null) {
         count = fcontext.base.size();
