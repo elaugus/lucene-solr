@@ -1799,25 +1799,29 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable,SolrIn
       qr.setNextCursorMark(cmd.getCursorMark());
     } else {
       boolean useToParentBlock = false;
-      if(query instanceof FilteredQuery){
-        FilteredQuery q=(FilteredQuery)query;
-        if(q.getQuery() instanceof ToParentBlockJoinQuery){
+      if (query instanceof FilteredQuery) {
+        FilteredQuery q = (FilteredQuery) query;
+        if (q.getQuery() instanceof ToParentBlockJoinQuery) {
           useToParentBlock = true;
         }
       }
-      InternalData iData=null;
-      if(useToParentBlock){
-        iData=useToParentBlockJoinCollector(qr,query,cmd,pf,len);
-        int parentsSliceLen = Math.min(lastDocRequested,iData.totalHits);
-        if (parentsSliceLen < 0) parentsSliceLen=0;
-        qr.setDocSet(new DocSlice(0,parentsSliceLen,iData.parentDocuments,iData.parentScores,iData.totalHits,iData.maxScore));
-      }else{
-        iData=useTopDocsCollector(qr,query,cmd,pf,len);  
+      InternalData iData = null;
+      if (useToParentBlock) {
+        iData = useToParentBlockJoinCollector(qr, query, cmd, pf, len);
+        /* Facets data start */
+        InternalData facetsData = useTopDocsCollector(qr, query, cmd, pf, iData.totalHits);
+        int parentsSliceLen = facetsData.totalHits;
+        if (parentsSliceLen < 0) parentsSliceLen = 0;
+        qr.setDocSet(new DocSlice(0, parentsSliceLen, facetsData.thisPageDocuments, facetsData.thisPageScores,
+            facetsData.totalHits, facetsData.maxScore));
+        /* Facets data end */
+      } else {
+        iData = useTopDocsCollector(qr, query, cmd, pf, len);
       }
-      nDocsReturned = iData.nDocsReturned;
-      ids=iData.finalDocuments;
-      scores = iData.documentsScores;
-      totalHits=iData.totalHits;
+      nDocsReturned = iData.documentsInResult;
+      ids = iData.thisPageDocuments;
+      scores = iData.thisPageScores;
+      totalHits = iData.totalHits;
       maxScore = iData.maxScore;
     }
 
@@ -1828,97 +1832,89 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable,SolrIn
   }
 
   class InternalData{
-    int nDocsReturned;
+    int documentsInResult;
     int totalHits;
     float maxScore;
-    int[] finalDocuments=new int[0];
-    int[] parentDocuments=new int[0];
-    float[] documentsScores=null;
-    float[] parentScores=null;  
+    int[] thisPageDocuments = new int[0];
+    float[] thisPageScores = null; 
   }
   
   private InternalData useTopDocsCollector(QueryResult qr, Query query, QueryCommand cmd, ProcessedFilter pf, int len) throws IOException {
     final TopDocsCollector topCollector = buildTopDocsCollector(len, cmd);
     Collector collector = topCollector;
     buildAndRunCollectorChain(qr, query, collector, cmd, pf.postFilter);
-    InternalData iData=new InternalData();
+    InternalData iData = new InternalData();
     iData.totalHits = topCollector.getTotalHits();
     TopDocs topDocs = topCollector.topDocs(0, len);
     populateNextCursorMarkFromTopDocs(qr, cmd, topDocs);
-    iData.maxScore = iData.totalHits>0 ? topDocs.getMaxScore() : 0.0f;
-    iData.nDocsReturned = topDocs.scoreDocs.length;
-    iData.finalDocuments = new int[iData.nDocsReturned];
-    iData.documentsScores = (cmd.getFlags()&GET_SCORES)!=0 ? new float[iData.nDocsReturned] : null;
-    for (int i=0; i<iData.nDocsReturned; i++) {
+    iData.maxScore = iData.totalHits > 0 ? topDocs.getMaxScore() : 0.0f;
+    iData.documentsInResult = topDocs.scoreDocs.length;
+    iData.thisPageDocuments = new int[iData.documentsInResult];
+    iData.thisPageScores = (cmd.getFlags() & GET_SCORES) != 0 ? new float[iData.documentsInResult] : null;
+    for (int i = 0; i < iData.documentsInResult; i++) {
       ScoreDoc scoreDoc = topDocs.scoreDocs[i];
-      iData.finalDocuments[i] = scoreDoc.doc;
-      if (iData.documentsScores != null) iData.documentsScores[i] = scoreDoc.score;
-    }   
+      iData.thisPageDocuments[i] = scoreDoc.doc;
+      if (iData.thisPageScores != null) iData.thisPageScores[i] = scoreDoc.score;
+    }
     return iData;
   }
   
   private InternalData useToParentBlockJoinCollector(QueryResult qr, Query query, QueryCommand cmd, ProcessedFilter pf, int len) throws IOException {
-    ToParentBlockJoinCollector toParentBlockJoinCollector=new ToParentBlockJoinCollector(Sort.RELEVANCE, len, true, true);
-    FilteredQuery q=(FilteredQuery)query;
-    ToParentBlockJoinQuery mainParentQuery=(ToParentBlockJoinQuery)q.getQuery();
+    ToParentBlockJoinCollector toParentBlockJoinCollector = new ToParentBlockJoinCollector(Sort.RELEVANCE, len, true,
+        true);
+    FilteredQuery q = (FilteredQuery) query;
+    ToParentBlockJoinQuery mainParentQuery = (ToParentBlockJoinQuery) q.getQuery();
     IndexSearcher searcher = new ToParentBlockJoinIndexSearcher(wrapReader(core, rawReader));
     searcher.search(query, toParentBlockJoinCollector);
-    SchemaField keyField = schema.getUniqueKeyField();  
+    SchemaField keyField = schema.getUniqueKeyField();
     org.apache.solr.schema.FieldType idFt = keyField.getType();
-    InternalData iData=new InternalData();
-    TopGroups topGroups=toParentBlockJoinCollector.getTopGroupsWithAllChildDocs(mainParentQuery, Sort.RELEVANCE, 0, 0, true);    
-    if(topGroups == null) return iData;
-    int numberOfParents=topGroups.totalGroupCount;
-    LinkedHashMap<Integer,Float> childrenData=new LinkedHashMap<>();
-    LinkedHashMap<Integer,Float> parentsData=new LinkedHashMap<>();
+    InternalData iData = new InternalData();
+    TopGroups topGroups = toParentBlockJoinCollector.getTopGroupsWithAllChildDocs(mainParentQuery, Sort.RELEVANCE, 0, 0,
+        true);
+    if (topGroups == null) return iData;
+    int numberOfParents = topGroups.totalGroupCount;
+    LinkedHashMap<Integer,Float> childrenData = new LinkedHashMap<>();
+    LinkedHashMap<Integer,Float> parentsData = new LinkedHashMap<>();
     iData.totalHits = numberOfParents;
-    iData.maxScore = iData.totalHits>0 ? toParentBlockJoinCollector.getMaxScore() : 0.0f;
+    iData.maxScore = iData.totalHits > 0 ? toParentBlockJoinCollector.getMaxScore() : 0.0f;
     BitSetProducer parentBitSetProducer = mainParentQuery.getParentsFilter();
-    for(int i=0;i<numberOfParents;i++){
-      try{
-        GroupDocs group=topGroups.groups[i];
-        int parentId=(Integer)group.groupValue;
+    for (int i = 0; i < topGroups.groups.length; i++) {
+      try {
+        GroupDocs group = topGroups.groups[i];
+        int parentId = (Integer) group.groupValue;
         parentsData.put(parentId, group.maxScore);
-        Set<String> preFetchFieldNames=new HashSet<>();
+        Set<String> preFetchFieldNames = new HashSet<>();
         preFetchFieldNames.add(keyField.getName());
-        Document parentDoc = searcher.doc(parentId,preFetchFieldNames);
+        Document parentDoc = searcher.doc(parentId, preFetchFieldNames);
         String parentIdExt = schema.printableUniqueKey(parentDoc);
-        TermQuery childFilter=new TermQuery(new Term("content_type", "current_entry"));
+        TermQuery childFilter = new TermQuery(new Term("content_type", "current_entry"));
         Query parentFilter = idFt.getFieldQuery(null, keyField, parentIdExt);
-        Query childsQuery = new ToChildBlockJoinQuery(parentFilter, parentBitSetProducer);  
+        Query childsQuery = new ToChildBlockJoinQuery(parentFilter, parentBitSetProducer);
         DocList children = getDocList(childsQuery, childFilter, new Sort(), 0, 1);
-        if(children.matches() > 0) {
+        if (children.matches() > 0) {
           DocIterator j = children.iterator();
-          while(j.hasNext()) {
+          while (j.hasNext()) {
             Integer childDocNum = j.next();
             childrenData.put(childDocNum, 0.0f);
           }
-        }  
-        for(ScoreDoc matchingDoc:group.scoreDocs){
+        }
+        for (ScoreDoc matchingDoc : group.scoreDocs) {
           childrenData.put(matchingDoc.doc, matchingDoc.score);
           break;
-        }        
-      }catch(Exception e){
-        iData.totalHits--;
+        }
+      } catch (Exception e) {
+        e.printStackTrace();
       }
     }
-    iData.finalDocuments = new int[childrenData.keySet().size()];    
-    iData.documentsScores = new float[childrenData.keySet().size()];
-    int i=0;
-    for(Entry<Integer,Float> entry: childrenData.entrySet()){
-      iData.finalDocuments[i] = entry.getKey();
-      iData.documentsScores[i] = entry.getValue();
+    iData.thisPageDocuments = new int[childrenData.keySet().size()];
+    iData.thisPageScores = new float[childrenData.keySet().size()];
+    int i = 0;
+    for (Entry<Integer,Float> entry : childrenData.entrySet()) {
+      iData.thisPageDocuments[i] = entry.getKey();
+      iData.thisPageScores[i] = entry.getValue();
       i++;
     }
-    iData.parentDocuments = new int[parentsData.keySet().size()];    
-    iData.parentScores = new float[parentsData.keySet().size()];
-    int j=0;
-    for(Entry<Integer,Float> entry: parentsData.entrySet()){
-      iData.parentDocuments[j] = entry.getKey();
-      iData.parentScores[j] = entry.getValue();
-      j++;
-    }
-    iData.nDocsReturned = iData.finalDocuments.length;    
+    iData.documentsInResult = iData.thisPageDocuments.length;
     return iData;
   }
   
