@@ -1809,11 +1809,13 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable,SolrIn
       if (useToParentBlock) {
         iData = useToParentBlockJoinCollector(qr, query, cmd, pf, len);
         /* Facets data start */
-        InternalData facetsData = useTopDocsCollector(qr, query, cmd, pf, iData.totalHits);
-        int parentsSliceLen = facetsData.totalHits;
-        if (parentsSliceLen < 0) parentsSliceLen = 0;
-        qr.setDocSet(new DocSlice(0, parentsSliceLen, facetsData.thisPageDocuments, facetsData.thisPageScores,
-            facetsData.totalHits, facetsData.maxScore));
+        if(iData.totalHits>0){
+          InternalData facetsData = useTopDocsCollector(qr, query, cmd, pf, iData.totalHits);
+          int parentsSliceLen = facetsData.totalHits;
+          if (parentsSliceLen < 0) parentsSliceLen = 0;
+          qr.setDocSet(new DocSlice(0, parentsSliceLen, facetsData.thisPageDocuments, facetsData.thisPageScores,
+              facetsData.totalHits, facetsData.maxScore));          
+        }
         /* Facets data end */
       } else {
         iData = useTopDocsCollector(qr, query, cmd, pf, len);
