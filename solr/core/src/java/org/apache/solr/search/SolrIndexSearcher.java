@@ -1893,16 +1893,28 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable,SolrIn
         Query parentFilter = idFt.getFieldQuery(null, keyField, parentIdExt);
         Query childsQuery = new ToChildBlockJoinQuery(parentFilter, parentBitSetProducer);
         DocList children = getDocList(childsQuery, childFilter, new Sort(), 0, 1);
+        int currentItemDoc = 0;
         if (children.matches() > 0) {
           DocIterator j = children.iterator();
           while (j.hasNext()) {
-            Integer childDocNum = j.next();
-            childrenData.put(childDocNum, 0.0f);
+            currentItemDoc = j.next();
+            childrenData.put(currentItemDoc, 0.0f);
           }
         }
+        boolean currentItemMatched = false;
         for (ScoreDoc matchingDoc : group.scoreDocs) {
-          childrenData.put(matchingDoc.doc, matchingDoc.score);
-          break;
+          if (matchingDoc.doc == currentItemDoc) {
+            currentItemMatched = true;
+          }
+        }        
+        int counter = 0;
+        for (ScoreDoc matchingDoc : group.scoreDocs) {
+          if (matchingDoc.doc == currentItemDoc) {
+            childrenData.put(matchingDoc.doc, matchingDoc.score);
+          }else if(!currentItemMatched && counter == 0){
+            childrenData.put(matchingDoc.doc, matchingDoc.score);
+            counter++;
+          }          
         }
       } catch (Exception e) {
         e.printStackTrace();
