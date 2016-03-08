@@ -114,7 +114,7 @@ public class DocValuesFacets {
     final int nTerms=endTermIndex-startTermIndex;
     int missingCount = -1; 
     final CharsRefBuilder charsRef = new CharsRefBuilder();
-    if (nTerms>0 && docs.size() >= mincount) {
+    if (nTerms>0 && docs != null && docs.size() >= mincount) {
 
       // count collection array only needs to be as big as the number of terms we are
       // going to collect counts for.

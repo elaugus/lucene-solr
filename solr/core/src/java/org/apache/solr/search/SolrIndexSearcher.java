@@ -1813,7 +1813,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable,SolrIn
           InternalData facetsData = useTopDocsCollector(qr, query, cmd, pf, iData.totalHits);
           int parentsSliceLen = facetsData.totalHits;
           if (parentsSliceLen < 0) parentsSliceLen = 0;
-          qr.setDocSet(new DocSlice(0, parentsSliceLen, facetsData.thisPageDocuments, facetsData.thisPageScores,
+          qr.setDocSet(new DocSlice(0, parentsSliceLen, facetsData.forFacetDocuments, facetsData.forFacetScores,
               facetsData.totalHits, facetsData.maxScore));          
         }
         /* Facets data end */
@@ -1838,7 +1838,9 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable,SolrIn
     int totalHits;
     float maxScore;
     int[] thisPageDocuments = new int[0];
-    float[] thisPageScores = null; 
+    float[] thisPageScores = null;
+    int[] forFacetDocuments = new int[0];
+    float[] forFacetScores = null;
   }
   
   private InternalData useTopDocsCollector(QueryResult qr, Query query, QueryCommand cmd, ProcessedFilter pf, int len) throws IOException {
@@ -1853,11 +1855,14 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable,SolrIn
     iData.documentsInResult = topDocs.scoreDocs.length;
     iData.thisPageDocuments = new int[iData.documentsInResult];
     iData.thisPageScores = (cmd.getFlags() & GET_SCORES) != 0 ? new float[iData.documentsInResult] : null;
+    iData.forFacetDocuments = new int[iData.documentsInResult];
+    iData.forFacetScores = (cmd.getFlags() & GET_SCORES) != 0 ? new float[iData.documentsInResult] : null;
     for (int i = 0; i < iData.documentsInResult; i++) {
       ScoreDoc scoreDoc = topDocs.scoreDocs[i];
       iData.thisPageDocuments[i] = scoreDoc.doc;
       if (iData.thisPageScores != null) iData.thisPageScores[i] = scoreDoc.score;
-    }
+      iData.forFacetDocuments[i] = scoreDoc.doc;
+      if (iData.forFacetScores != null) iData.forFacetScores[i] = scoreDoc.score;    }
     return iData;
   }
   
@@ -1880,11 +1885,15 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable,SolrIn
     iData.totalHits = numberOfParents;
     iData.maxScore = iData.totalHits > 0 ? toParentBlockJoinCollector.getMaxScore() : 0.0f;
     BitSetProducer parentBitSetProducer = mainParentQuery.getParentsFilter();
+    iData.forFacetDocuments = new int[topGroups.groups.length];
+    iData.forFacetScores = new float[topGroups.groups.length];
     for (int i = 0; i < topGroups.groups.length; i++) {
       try {
         GroupDocs group = topGroups.groups[i];
         int parentId = (Integer) group.groupValue;
         parentsData.put(parentId, group.maxScore);
+        iData.forFacetDocuments[i] = parentId;
+        iData.forFacetScores[i] = group.maxScore;
         Set<String> preFetchFieldNames = new HashSet<>();
         preFetchFieldNames.add(keyField.getName());
         Document parentDoc = searcher.doc(parentId, preFetchFieldNames);
